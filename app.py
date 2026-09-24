@@ -2,18 +2,28 @@ import streamlit as st
 import pandas as pd
 from pypdf import PdfReader
 from fontTools.ttLib import TTFont
-import io
+import os
 
-# --- LAYOUT ENGINE ---
-class PDFLayoutAdvisorEngine:
+# --- LAYOUT ENGINE DEFINITION ---
+class PDFAdvisorEngine:
     def __init__(self, font_path):
-        self.font = TTFont(font_path)
-        self.head_table = self.font['head']
-        self.cmap = self.font.getBestCmap()
-        self.hmtx = self.font['hmtx']
-        self.units_per_em = self.head_table.unitsPerEm
+        self.font_loaded = False
+        if os.path.exists(font_path):
+            try:
+                self.font = TTFont(font_path)
+                self.head_table = self.font['head']
+                self.cmap = self.font.getBestCmap()
+                self.hmtx = self.font['hmtx']
+                self.units_per_em = self.head_table.unitsPerEm
+                self.font_loaded = True
+            except Exception:
+                self.font_loaded = False
 
     def get_char_width(self, char, font_size_pt):
+        if not self.font_loaded:
+            # Fallback estimation if font file fails to load
+            return font_size_pt * 0.55
+        
         char_code = ord(char)
         glyph_name = self.cmap.get(char_code)
         if glyph_name:
@@ -50,7 +60,7 @@ class PDFLayoutAdvisorEngine:
             "Max Safe Chars": max_safe_chars
         }
 
-# --- PARSE PDF FIELDS ---
+# --- HELPER: PARSE PDF FIELDS ---
 def extract_pdf_fields(pdf_file):
     reader = PdfReader(pdf_file)
     extracted_fields = []
@@ -61,10 +71,7 @@ def extract_pdf_fields(pdf_file):
             field_name = field_data.get('/T', field_key)
             field_val = field_data.get('/V', '')
             
-            # Default estimated width in points if BBox unavailable (e.g. 150pt)
             box_width = 150.0
-            
-            # Try parsing rectangle bounds / /Rect if available
             rect = field_data.get('/Rect')
             if rect and len(rect) == 4:
                 box_width = float(rect[2]) - float(rect[0])
@@ -83,17 +90,20 @@ st.set_page_config(page_title="PDF Label Layout Advisor", layout="wide")
 st.title("📄 PDF Label Layout Advisor")
 st.markdown("Upload a PDF form or label to automatically extract fields, detect text overflow/column collision, and re-analyze custom values in real time.")
 
+# Initialize Engine
 engine = PDFAdvisorEngine("Arial.ttf")
+
+if not engine.font_loaded:
+    st.warning("⚠️ `Arial.ttf` was not found in the root repository folder. Using estimated font metrics fallback.")
 
 # 1. File Upload
 uploaded_pdf = st.file_uploader("Upload PDF Label / Form", type=["pdf"])
 
 if uploaded_pdf is not None:
-    # Extract fields
     pdf_fields = extract_pdf_fields(uploaded_pdf)
     
     if not pdf_fields:
-        st.warning("No interactive PDF fields found. Populating default sample table for analysis...")
+        st.warning("No interactive form fields found in PDF. Loading demo fields for preview...")
         pdf_fields = [
             {"Field Name": "PO_Number", "Value": "PO-99482019482-X", "Box Width (pt)": 80.0, "Font Size (pt)": 10.0},
             {"Field Name": "Item_Description", "Value": "Stainless Steel Industrial Grade Hex Bolt Assembly Heavy Duty", "Box Width (pt)": 150.0, "Font Size (pt)": 10.0},
@@ -102,12 +112,10 @@ if uploaded_pdf is not None:
         ]
 
     st.subheader("1. Interactive Field Data Editor")
-    st.info("💡 Edit any text value or box width below. The analysis table will update automatically!")
+    st.info("💡 Edit any value or box width below to re-analyze text fit in real time.")
 
-    # Load data into Pandas DataFrame for Streamlit's data_editor
     df_input = pd.DataFrame(pdf_fields)
     
-    # Interactive Table Editor
     edited_df = st.data_editor(
         df_input,
         num_rows="dynamic",
@@ -122,7 +130,6 @@ if uploaded_pdf is not None:
 
     st.subheader("2. Layout & Overflow Analysis Output")
 
-    # Run Analysis on edited data
     results = []
     for _, row in edited_df.iterrows():
         res = engine.analyze_field(
@@ -135,7 +142,6 @@ if uploaded_pdf is not None:
 
     df_results = pd.DataFrame(results)
 
-    # Highlight overflow rows in red
     def highlight_overflow(val):
         color = '#ff4b4b' if val == '⚠️ OVERFLOW' else '#28a745'
         return f'background-color: {color}; color: white; font-weight: bold;'
@@ -145,7 +151,6 @@ if uploaded_pdf is not None:
         use_container_width=True
     )
 
-    # Summary Metrics
     overflow_count = sum(1 for r in results if r["Overflow Status"] == "⚠️ OVERFLOW")
     if overflow_count > 0:
         st.error(f"⚠️ Warning: {overflow_count} field(s) exceed their container width and risk spilling into adjacent columns!")
