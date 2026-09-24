@@ -58,72 +58,69 @@ class PDFAdvisorEngine:
             "Max Safe Chars": max_safe_chars
         }
 
-# --- PDF SPATIAL PARSER & VISUAL RENDERER ---
-def extract_label_data_spatially(pdf_file):
+# --- ROBUST SPATIAL PARSER ---
+def extract_clean_kv_pairs(pdf_file):
     extracted_fields = []
     page_images = []
     
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
-            # Render visual reference image of PDF page
+            # 1. Render page preview
             p_img = page.to_image(resolution=150).original
             page_images.append(p_img)
             
-            # Group words by vertical line position (y-axis)
+            # 2. Extract words with precise coordinates
             words = page.extract_words()
-            lines_dict = {}
-            for w in words:
-                top_key = round(w["top"], -1)  # group words within 10pt vertical height
-                lines_dict.setdefault(top_key, []).append(w)
+            
+            # Group words by line (within 4pt vertical position tolerance)
+            lines = []
+            for word in words:
+                assigned = False
+                for line in lines:
+                    if abs(line['top'] - word['top']) <= 4:
+                        line['words'].append(word)
+                        assigned = True
+                        break
+                if not assigned:
+                    lines.append({'top': word['top'], 'words': [word]})
 
-            # Process line by line
-            for top_pos in sorted(lines_dict.keys()):
-                line_words = sorted(lines_dict[top_pos], key=lambda x: x["x0"])
-                
-                # Split line into Left Column (x0 < midpoint) and Right Column (x0 >= midpoint)
-                midpoint = page.width / 2.0
-                left_words = [w["text"] for w in line_words if w["x0"] < midpoint]
-                right_words = [w["text"] for w in line_words if w["x0"] >= midpoint]
-                
-                # Parse Left Column
-                if left_words:
-                    l_text = " ".join(left_words)
-                    if ":" in l_text:
-                        parts = l_text.split(":", 1)
-                        header = parts[0].strip()
-                        val = parts[1].strip()
-                    else:
-                        header = "Field_" + str(len(extracted_fields) + 1)
-                        val = l_text
-                    
-                    if val:
+            # Sort lines top-to-bottom
+            lines = sorted(lines, key=lambda l: l['top'])
+
+            for i, line in enumerate(lines):
+                # Sort words left-to-right within line
+                line_words = sorted(line['words'], key=lambda w: w['x0'])
+                line_text = " ".join([w['text'] for w in line_words])
+
+                # Check if line contains a field label ending with ":" or known headers
+                if ":" in line_text:
+                    parts = line_text.split(":")
+                    header = parts[0].strip()
+                    val = ":".join(parts[1:]).strip()
+
+                    # If value is on the line immediately below the header
+                    if not val and i + 1 < len(lines):
+                        next_line_words = sorted(lines[i + 1]['words'], key=lambda w: w['x0'])
+                        val = " ".join([w['text'] for w in next_line_words if abs(w['x0'] - line_words[0]['x0']) < 150])
+
+                    if header:
                         extracted_fields.append({
-                            "Extracted Value / Text": val,
+                            "Extracted Value / Text": val if val else "—",
                             "Constant Header / Field Name": header,
-                            "Box Width (pt)": round(midpoint - 20, 1),
+                            "Box Width (pt)": 150.0,
                             "Font Size (pt)": 10.0
                         })
 
-                # Parse Right Column
-                if right_words:
-                    r_text = " ".join(right_words)
-                    if ":" in r_text:
-                        parts = r_text.split(":", 1)
-                        header = parts[0].strip()
-                        val = parts[1].strip()
-                    else:
-                        header = "Field_" + str(len(extracted_fields) + 1)
-                        val = r_text
+    # Deduplicate while preserving order
+    seen = set()
+    clean_fields = []
+    for item in extracted_fields:
+        identifier = (item["Constant Header / Field Name"], item["Extracted Value / Text"])
+        if identifier not in seen:
+            seen.add(identifier)
+            clean_fields.append(item)
 
-                    if val:
-                        extracted_fields.append({
-                            "Extracted Value / Text": val,
-                            "Constant Header / Field Name": header,
-                            "Box Width (pt)": round(midpoint - 20, 1),
-                            "Font Size (pt)": 10.0
-                        })
-
-    return extracted_fields, page_images
+    return clean_fields, page_images
 
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="PDF Label Layout Advisor", layout="wide")
@@ -135,9 +132,9 @@ engine = PDFAdvisorEngine("Arial.ttf")
 uploaded_pdf = st.file_uploader("Upload PDF Label / Form", type=["pdf"])
 
 if uploaded_pdf is not None:
-    pdf_fields, page_images = extract_label_data_spatially(uploaded_pdf)
+    pdf_fields, page_images = extract_clean_kv_pairs(uploaded_pdf)
     
-    st.subheader("1. Visual Reference Preview")
+    st.subheader("1. Visual Reference & Data Editor")
     col_img, col_data = st.columns([1, 2])
     
     with col_img:
@@ -146,8 +143,8 @@ if uploaded_pdf is not None:
             st.image(img, use_container_width=True)
 
     with col_data:
-        st.markdown("**2. Interactive Field Data Editor:**")
-        st.info("💡 Header is on the Right side and Value on the Left. Edit any cell below to re-analyze fit!")
+        st.markdown("**Interactive Field Data Editor:**")
+        st.info("👈 Column 1: **Extracted Value** | Column 2: **Constant Header**")
 
         df_input = pd.DataFrame(pdf_fields)
         
@@ -163,7 +160,7 @@ if uploaded_pdf is not None:
             }
         )
 
-    st.subheader("3. Layout & Overflow Analysis Output")
+    st.subheader("2. Layout & Overflow Analysis Output")
 
     results = []
     for _, row in edited_df.iterrows():
