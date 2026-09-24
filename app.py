@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 from fontTools.ttLib import TTFont
-from PIL import Image
 import os
 
 # --- LAYOUT ENGINE ---
@@ -138,18 +137,17 @@ uploaded_pdf = st.file_uploader("Upload PDF Label / Form", type=["pdf"])
 if uploaded_pdf is not None:
     pdf_fields, page_images = extract_label_data_spatially(uploaded_pdf)
     
-    # Render PDF Visual Reference Sidebar / Preview
     st.subheader("1. Visual Reference Preview")
     col_img, col_data = st.columns([1, 2])
     
     with col_img:
         st.markdown("**PDF Visual Reference:**")
         for img in page_images:
-            st.image(img, use_column_width=True)
+            st.image(img, use_container_width=True)
 
     with col_data:
         st.markdown("**2. Interactive Field Data Editor:**")
-        st.info("💡 Header is now on the Right side and Value on the Left. Edit any cell below to re-analyze fit!")
+        st.info("💡 Header is on the Right side and Value on the Left. Edit any cell below to re-analyze fit!")
 
         df_input = pd.DataFrame(pdf_fields)
         
