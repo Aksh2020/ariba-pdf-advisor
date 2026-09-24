@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 from fontTools.ttLib import TTFont
-import re
+from PIL import Image
 import os
 
 # --- LAYOUT ENGINE ---
@@ -49,8 +49,8 @@ class PDFAdvisorEngine:
         status = "⚠️ OVERFLOW" if overflow else "OK"
 
         return {
-            "Field Name": field_name,
-            "Current Value": text_str,
+            "Extracted Value / Text": text_str,
+            "Constant Header / Field Name": field_name,
             "Value Length": len(text_str),
             "Text Width (pt)": round(calc_width, 1),
             "Box Width (pt)": round(container_width_pt, 1),
@@ -59,90 +59,119 @@ class PDFAdvisorEngine:
             "Max Safe Chars": max_safe_chars
         }
 
-# --- PDF TEXT & KEY-VALUE PARSER ---
-def extract_label_data_from_pdf(pdf_file):
+# --- PDF SPATIAL PARSER & VISUAL RENDERER ---
+def extract_label_data_spatially(pdf_file):
     extracted_fields = []
+    page_images = []
     
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
-            text_lines = page.extract_text().split("\n")
+            # Render visual reference image of PDF page
+            p_img = page.to_image(resolution=150).original
+            page_images.append(p_img)
             
-            for line in text_lines:
-                line_str = line.strip()
-                if not line_str:
-                    continue
+            # Group words by vertical line position (y-axis)
+            words = page.extract_words()
+            lines_dict = {}
+            for w in words:
+                top_key = round(w["top"], -1)  # group words within 10pt vertical height
+                lines_dict.setdefault(top_key, []).append(w)
+
+            # Process line by line
+            for top_pos in sorted(lines_dict.keys()):
+                line_words = sorted(lines_dict[top_pos], key=lambda x: x["x0"])
                 
-                # Check for "Label: Value" patterns (e.g. "Supplier Name: GE_Test_R...")
-                if ":" in line_str:
-                    parts = line_str.split(":", 1)
-                    label = parts[0].strip()
-                    val = parts[1].strip()
+                # Split line into Left Column (x0 < midpoint) and Right Column (x0 >= midpoint)
+                midpoint = page.width / 2.0
+                left_words = [w["text"] for w in line_words if w["x0"] < midpoint]
+                right_words = [w["text"] for w in line_words if w["x0"] >= midpoint]
+                
+                # Parse Left Column
+                if left_words:
+                    l_text = " ".join(left_words)
+                    if ":" in l_text:
+                        parts = l_text.split(":", 1)
+                        header = parts[0].strip()
+                        val = parts[1].strip()
+                    else:
+                        header = "Field_" + str(len(extracted_fields) + 1)
+                        val = l_text
                     
-                    if label and val:
+                    if val:
                         extracted_fields.append({
-                            "Field Name": label,
-                            "Value": val,
-                            "Box Width (pt)": 180.0,  # Default column width allowance
+                            "Extracted Value / Text": val,
+                            "Constant Header / Field Name": header,
+                            "Box Width (pt)": round(midpoint - 20, 1),
                             "Font Size (pt)": 10.0
                         })
-                else:
-                    # Generic line text capture
-                    if len(line_str) > 3:
+
+                # Parse Right Column
+                if right_words:
+                    r_text = " ".join(right_words)
+                    if ":" in r_text:
+                        parts = r_text.split(":", 1)
+                        header = parts[0].strip()
+                        val = parts[1].strip()
+                    else:
+                        header = "Field_" + str(len(extracted_fields) + 1)
+                        val = r_text
+
+                    if val:
                         extracted_fields.append({
-                            "Field Name": line_str[:15] + "...",
-                            "Value": line_str,
-                            "Box Width (pt)": 200.0,
+                            "Extracted Value / Text": val,
+                            "Constant Header / Field Name": header,
+                            "Box Width (pt)": round(midpoint - 20, 1),
                             "Font Size (pt)": 10.0
                         })
-                        
-    return extracted_fields
+
+    return extracted_fields, page_images
 
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="PDF Label Layout Advisor", layout="wide")
 st.title("📄 PDF Label Layout Advisor")
-st.markdown("Upload a PDF form or label to automatically extract text fields, detect overflow, and test values in real time.")
+st.markdown("Upload a PDF form or label to extract text fields, preview the label visually, and analyze text overflow in real time.")
 
 engine = PDFAdvisorEngine("Arial.ttf")
 
 uploaded_pdf = st.file_uploader("Upload PDF Label / Form", type=["pdf"])
 
 if uploaded_pdf is not None:
-    pdf_fields = extract_label_data_from_pdf(uploaded_pdf)
+    pdf_fields, page_images = extract_label_data_spatially(uploaded_pdf)
     
-    if pdf_fields:
-        st.success(f"Successfully extracted {len(pdf_fields)} text elements from PDF!")
-    else:
-        st.warning("Could not extract structured text lines. Loading sample data...")
-        pdf_fields = [
-            {"Field Name": "Supplier Name", "Value": "GE_Test_R_The National Board Of Boiler - TEST", "Box Width (pt)": 180.0, "Font Size (pt)": 10.0},
-            {"Field Name": "Delivery Date", "Value": "11/16/2026", "Box Width (pt)": 100.0, "Font Size (pt)": 10.0},
-            {"Field Name": "ASN / Packing Slip Number", "Value": "42300296111-3", "Box Width (pt)": 120.0, "Font Size (pt)": 10.0}
-        ]
-
-    st.subheader("1. Interactive Field Data Editor")
-    st.info("💡 Edit any value or box width below to re-analyze text fit in real time.")
-
-    df_input = pd.DataFrame(pdf_fields)
+    # Render PDF Visual Reference Sidebar / Preview
+    st.subheader("1. Visual Reference Preview")
+    col_img, col_data = st.columns([1, 2])
     
-    edited_df = st.data_editor(
-        df_input,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "Field Name": st.column_config.TextColumn("Field Name / Label", required=True),
-            "Value": st.column_config.TextColumn("Extracted Value / Text", required=True),
-            "Box Width (pt)": st.column_config.NumberColumn("Container Width (pt)", min_value=10, step=5),
-            "Font Size (pt)": st.column_config.NumberColumn("Font Size (pt)", min_value=6, max_value=72, step=1)
-        }
-    )
+    with col_img:
+        st.markdown("**PDF Visual Reference:**")
+        for img in page_images:
+            st.image(img, use_column_width=True)
 
-    st.subheader("2. Layout & Overflow Analysis Output")
+    with col_data:
+        st.markdown("**2. Interactive Field Data Editor:**")
+        st.info("💡 Header is now on the Right side and Value on the Left. Edit any cell below to re-analyze fit!")
+
+        df_input = pd.DataFrame(pdf_fields)
+        
+        edited_df = st.data_editor(
+            df_input,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "Extracted Value / Text": st.column_config.TextColumn("Extracted Value / Text (LEFT)", required=True),
+                "Constant Header / Field Name": st.column_config.TextColumn("Constant Header / Field Name (RIGHT)", required=True),
+                "Box Width (pt)": st.column_config.NumberColumn("Container Width (pt)", min_value=10, step=5),
+                "Font Size (pt)": st.column_config.NumberColumn("Font Size (pt)", min_value=6, max_value=72, step=1)
+            }
+        )
+
+    st.subheader("3. Layout & Overflow Analysis Output")
 
     results = []
     for _, row in edited_df.iterrows():
         res = engine.analyze_field(
-            field_name=row["Field Name"],
-            value=row["Value"],
+            field_name=row["Constant Header / Field Name"],
+            value=row["Extracted Value / Text"],
             container_width_pt=float(row["Box Width (pt)"]),
             font_size_pt=float(row["Font Size (pt)"])
         )
