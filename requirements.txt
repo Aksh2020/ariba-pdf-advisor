@@ -1,2 +1,4 @@
 streamlit>=1.30.0
 fonttools>=4.40.0
+pypdf>=3.17.0
+pandas>=2.0.0
