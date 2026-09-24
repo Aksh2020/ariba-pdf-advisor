@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
-from pypdf import PdfReader
+import pdfplumber
 from fontTools.ttLib import TTFont
+import re
 import os
 
-# --- LAYOUT ENGINE DEFINITION ---
+# --- LAYOUT ENGINE ---
 class PDFAdvisorEngine:
     def __init__(self, font_path):
         self.font_loaded = False
@@ -21,7 +22,6 @@ class PDFAdvisorEngine:
 
     def get_char_width(self, char, font_size_pt):
         if not self.font_loaded:
-            # Fallback estimation if font file fails to load
             return font_size_pt * 0.55
         
         char_code = ord(char)
@@ -43,7 +43,6 @@ class PDFAdvisorEngine:
         overflow = calc_width > container_width_pt
         diff_pt = calc_width - container_width_pt
         
-        # Estimate capacity limit
         avg_char_w = calc_width / len(text_str) if len(text_str) > 0 else font_size_pt * 0.5
         max_safe_chars = int(container_width_pt // avg_char_w) if avg_char_w > 0 else 0
 
@@ -60,55 +59,64 @@ class PDFAdvisorEngine:
             "Max Safe Chars": max_safe_chars
         }
 
-# --- HELPER: PARSE PDF FIELDS ---
-def extract_pdf_fields(pdf_file):
-    reader = PdfReader(pdf_file)
+# --- PDF TEXT & KEY-VALUE PARSER ---
+def extract_label_data_from_pdf(pdf_file):
     extracted_fields = []
     
-    fields = reader.get_fields()
-    if fields:
-        for field_key, field_data in fields.items():
-            field_name = field_data.get('/T', field_key)
-            field_val = field_data.get('/V', '')
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            text_lines = page.extract_text().split("\n")
             
-            box_width = 150.0
-            rect = field_data.get('/Rect')
-            if rect and len(rect) == 4:
-                box_width = float(rect[2]) - float(rect[0])
-
-            extracted_fields.append({
-                "Field Name": str(field_name),
-                "Value": str(field_val) if field_val else "Sample " + str(field_name),
-                "Box Width (pt)": float(box_width),
-                "Font Size (pt)": 10.0
-            })
-            
+            for line in text_lines:
+                line_str = line.strip()
+                if not line_str:
+                    continue
+                
+                # Check for "Label: Value" patterns (e.g. "Supplier Name: GE_Test_R...")
+                if ":" in line_str:
+                    parts = line_str.split(":", 1)
+                    label = parts[0].strip()
+                    val = parts[1].strip()
+                    
+                    if label and val:
+                        extracted_fields.append({
+                            "Field Name": label,
+                            "Value": val,
+                            "Box Width (pt)": 180.0,  # Default column width allowance
+                            "Font Size (pt)": 10.0
+                        })
+                else:
+                    # Generic line text capture
+                    if len(line_str) > 3:
+                        extracted_fields.append({
+                            "Field Name": line_str[:15] + "...",
+                            "Value": line_str,
+                            "Box Width (pt)": 200.0,
+                            "Font Size (pt)": 10.0
+                        })
+                        
     return extracted_fields
 
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="PDF Label Layout Advisor", layout="wide")
 st.title("📄 PDF Label Layout Advisor")
-st.markdown("Upload a PDF form or label to automatically extract fields, detect text overflow/column collision, and re-analyze custom values in real time.")
+st.markdown("Upload a PDF form or label to automatically extract text fields, detect overflow, and test values in real time.")
 
-# Initialize Engine
 engine = PDFAdvisorEngine("Arial.ttf")
 
-if not engine.font_loaded:
-    st.warning("⚠️ `Arial.ttf` was not found in the root repository folder. Using estimated font metrics fallback.")
-
-# 1. File Upload
 uploaded_pdf = st.file_uploader("Upload PDF Label / Form", type=["pdf"])
 
 if uploaded_pdf is not None:
-    pdf_fields = extract_pdf_fields(uploaded_pdf)
+    pdf_fields = extract_label_data_from_pdf(uploaded_pdf)
     
-    if not pdf_fields:
-        st.warning("No interactive form fields found in PDF. Loading demo fields for preview...")
+    if pdf_fields:
+        st.success(f"Successfully extracted {len(pdf_fields)} text elements from PDF!")
+    else:
+        st.warning("Could not extract structured text lines. Loading sample data...")
         pdf_fields = [
-            {"Field Name": "PO_Number", "Value": "PO-99482019482-X", "Box Width (pt)": 80.0, "Font Size (pt)": 10.0},
-            {"Field Name": "Item_Description", "Value": "Stainless Steel Industrial Grade Hex Bolt Assembly Heavy Duty", "Box Width (pt)": 150.0, "Font Size (pt)": 10.0},
-            {"Field Name": "Vendor_Code", "Value": "VEND-10492", "Box Width (pt)": 70.0, "Font Size (pt)": 10.0},
-            {"Field Name": "Quantity", "Value": "10000 EA", "Box Width (pt)": 40.0, "Font Size (pt)": 10.0}
+            {"Field Name": "Supplier Name", "Value": "GE_Test_R_The National Board Of Boiler - TEST", "Box Width (pt)": 180.0, "Font Size (pt)": 10.0},
+            {"Field Name": "Delivery Date", "Value": "11/16/2026", "Box Width (pt)": 100.0, "Font Size (pt)": 10.0},
+            {"Field Name": "ASN / Packing Slip Number", "Value": "42300296111-3", "Box Width (pt)": 120.0, "Font Size (pt)": 10.0}
         ]
 
     st.subheader("1. Interactive Field Data Editor")
@@ -121,8 +129,8 @@ if uploaded_pdf is not None:
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "Field Name": st.column_config.TextColumn("Field Name", required=True),
-            "Value": st.column_config.TextColumn("Sample Text / Value", required=True),
+            "Field Name": st.column_config.TextColumn("Field Name / Label", required=True),
+            "Value": st.column_config.TextColumn("Extracted Value / Text", required=True),
             "Box Width (pt)": st.column_config.NumberColumn("Container Width (pt)", min_value=10, step=5),
             "Font Size (pt)": st.column_config.NumberColumn("Font Size (pt)", min_value=6, max_value=72, step=1)
         }
